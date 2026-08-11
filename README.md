@@ -40,6 +40,26 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\deepseek-proxy
 The proxy forwards the `Authorization` header from Codex unchanged and stores
 no keys. It binds to `127.0.0.1` only.
 
+## Stability & management
+
+The proxy is supervised by `watchdog.ps1`: if the node process exits for any
+reason it is restarted automatically within ~2 seconds. If the port is still
+held by a previous instance, the watchdog waits until it frees and then takes
+over. A scheduled task `codex-deepseek-proxy` starts the watchdog at logon.
+
+```powershell
+# start (also used by the scheduled task)
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\deepseek-proxy\start-proxy.ps1"
+
+# stop (stops watchdog + proxy)
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\deepseek-proxy\stop-proxy.ps1"
+
+# remove auto-start if you do not want it
+Unregister-ScheduledTask -TaskName 'codex-deepseek-proxy' -Confirm:$false
+```
+
+Runtime logs: `proxy.log`, `proxy-error.log`, `proxy-watchdog.log`.
+
 ## Verification
 
 ```powershell

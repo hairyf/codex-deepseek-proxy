@@ -1,5 +1,7 @@
 node_modules/
 proxy.log
 proxy-error.log
+proxy-watchdog.log
+watchdog.pid
 .env
 *.bak

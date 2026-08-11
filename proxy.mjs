@@ -39,6 +39,15 @@ const HOP_BY_HOP = new Set([
   'content-length',
 ]);
 
+function logCrash(tag, err) {
+  const msg = err && err.stack ? err.stack : String(err);
+  console.error(`[${tag}] ${msg}`);
+}
+
+// Never let an unexpected stream/protocol error take the proxy down.
+process.on('uncaughtException', (err) => logCrash('uncaughtException', err));
+process.on('unhandledRejection', (err) => logCrash('unhandledRejection', err));
+
 function unwrapContent(content) {
   if (!Array.isArray(content)) return { out: content, changed: false };
   let changed = false;
@@ -128,6 +137,7 @@ function createProxyServer(upstreamBase) {
       received += c.length;
     });
     req.on('end', async () => {
+      try {
       let body;
       let rawBody;
       const ctype = String(req.headers['content-type'] || '');
@@ -155,12 +165,30 @@ function createProxyServer(upstreamBase) {
         }
         res.writeHead(upRes.statusCode, resHeaders);
         upRes.pipe(res);
+        upRes.on('error', (err) => {
+          console.error(`[error] upstream stream: ${err.message}`);
+          res.destroy();
+        });
+        res.on('error', (err) => {
+          console.error(`[error] client stream: ${err.message}`);
+          upRes.destroy();
+        });
+        res.on('close', () => {
+          upRes.destroy();
+        });
       } catch (err) {
         console.error(`[error] upstream ${upstreamBase} failed: ${err.message}`);
         if (!res.headersSent) {
           res.writeHead(502, { 'content-type': 'text/plain' });
         }
         res.end(`upstream error: ${err.message}`);
+      }
+      } catch (err) {
+        console.error(`[error] request handler: ${err.stack || err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'content-type': 'text/plain' });
+        }
+        res.end('internal proxy error');
       }
     });
     req.on('error', (err) => {
