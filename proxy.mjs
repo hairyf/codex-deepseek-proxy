@@ -20,6 +20,10 @@ import http from 'node:http';
 import https from 'node:https';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const LOG_DIR = fileURLToPath(new URL('../logs/', import.meta.url));
 
 // -----------------------------------------------------------------------------
 // 配置与常量
@@ -124,6 +128,24 @@ function transformBody(body) {
         if (changed) {
           isModified = true;
           return { ...item, content: out };
+        }
+      }
+
+      // Console Go 网关要求 assistant 消息的 content 是字符串：
+      // pro 模型遇到数组形式的 output_text 会报 "Invalid assistant message"。
+      // flash 两种都接受，因此统一转成字符串更稳妥。
+      if (
+        item.type === 'message' &&
+        item.role === 'assistant' &&
+        Array.isArray(item.content)
+      ) {
+        const text = item.content
+          .filter((c) => c && typeof c === 'object' && typeof c.text === 'string')
+          .map((c) => c.text)
+          .join('');
+        if (text.length > 0) {
+          isModified = true;
+          return { ...item, content: text };
         }
       }
 
@@ -424,6 +446,20 @@ function createProxyServer(upstreamBase) {
             } else {
               bodyBuffer = rawBuffer; // 未改写时直接复用 Raw Buffer
             }
+
+            // 诊断日志：记录 /responses 请求的关键特征
+            if (req.url.includes('/responses')) {
+              const p = transformed;
+              const input = Array.isArray(p.input) ? p.input : [];
+              const types = [...new Set(input.map((i) => i.type || 'message'))];
+              console.log(
+                `[req] model=${p.model} reasoning=${JSON.stringify(p.reasoning || null)} ` +
+                  `input=${input.length} types=[${types.join(',')}] ` +
+                  `assistant=${input.filter((i) => i.type === 'message' && i.role === 'assistant').length} ` +
+                  `function_call=${input.filter((i) => i.type === 'function_call').length} ` +
+                  `function_call_output=${input.filter((i) => i.type === 'function_call_output').length}`
+              );
+            }
           } catch {
             bodyBuffer = rawBuffer; // JSON 解析失败退回原始 Buffer
           }
@@ -440,33 +476,83 @@ function createProxyServer(upstreamBase) {
         headers['content-length'] = Buffer.byteLength(bodyBuffer);
       }
 
-      // 发起代理请求
-      const upstreamReq = transport.request(targetUrl, {
-        method: req.method,
-        headers,
-      });
+      // 发起代理请求。Console Go 网关在 thinking 模式下会间歇性丢弃
+      // reasoning_content 导致上游 400/500，这里支持一次降级重试：
+      // 命中 reasoning 相关错误时，用 reasoning:none 重试。
+      const isResponses = req.url.includes('/responses');
 
-      upstreamReq.on('error', (err) => {
-        logError('upstreamReq', err);
-        if (!res.headersSent) {
-          res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+      const sendUpstream = (body, hdrs) =>
+        new Promise((resolve, reject) => {
+          const upstreamReq = transport.request(targetUrl, {
+            method: req.method,
+            headers: hdrs,
+          });
+          upstreamReq.on('response', (upstreamRes) =>
+            resolve({ upstreamReq, upstreamRes })
+          );
+          upstreamReq.on('error', reject);
+          if (body !== undefined) {
+            upstreamReq.end(body);
+          } else {
+            pipeline(req, upstreamReq).catch(reject);
+          }
+        });
+
+      let requestBody = bodyBuffer;
+      let { upstreamRes } = await sendUpstream(requestBody, headers);
+
+      // 命中网关 thinking 模式 bug 时降级重试一次
+      if (
+        isResponses &&
+        requestBody !== undefined &&
+        (upstreamRes.statusCode === 400 || upstreamRes.statusCode === 500)
+      ) {
+        const errBuffer = await readStreamToBuffer(upstreamRes);
+        const errText = errBuffer.toString('utf8');
+        const retryable =
+          /reasoning_content|thinking mode|Invalid assistant message|Internal server error/i.test(
+            errText
+          );
+
+        if (retryable) {
+          const errSnippet = errText.replace(/\s+/g, ' ').slice(0, 140);
+          console.log(
+            `[retry] ${req.url} upstream ${upstreamRes.statusCode}; err=${errSnippet}; retrying with reasoning:none`
+          );
+          // 把触发重试的完整请求体落盘，便于定位网关 bug 的具体请求特征
+          try {
+            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+            mkdirSync(LOG_DIR, { recursive: true });
+            writeFileSync(`${LOG_DIR}retry-request-${ts}.json`, requestBody.toString('utf8'));
+            writeFileSync(`${LOG_DIR}retry-error-${ts}.json`, errText);
+          } catch (logErr) {
+            logError('retry-dump', logErr);
+          }
+          try {
+            const parsedRetry = JSON.parse(requestBody.toString('utf8'));
+            parsedRetry.reasoning = { effort: 'none' };
+            const retryBuffer = Buffer.from(JSON.stringify(parsedRetry));
+            headers['content-length'] = Buffer.byteLength(retryBuffer);
+            ({ upstreamRes } = await sendUpstream(retryBuffer, headers));
+            console.log(
+              `[retry] result: upstream ${upstreamRes.statusCode}; ${errSnippet}`
+            );
+          } catch (retryErr) {
+            logError('retry', retryErr);
+          }
+        } else {
+          // 非可重试错误（如 401/404），原样转发给 Codex
+          res.writeHead(upstreamRes.statusCode, filterHeaders(upstreamRes.headers));
+          res.end(errBuffer);
+          return;
         }
-        res.end(`Proxy Error: ${err.message}`);
-      });
-
-      if (bodyBuffer !== undefined) {
-        upstreamReq.end(bodyBuffer);
-      } else {
-        pipeline(req, upstreamReq).catch((err) => logError('req-pipeline', err));
       }
 
-      // 接收上游响应
-      const upstreamRes = await new Promise((resolve) => upstreamReq.once('response', resolve));
       res.writeHead(upstreamRes.statusCode, filterHeaders(upstreamRes.headers));
 
       const upstreamContentType = String(upstreamRes.headers['content-type'] || '');
       const isResponsesSse =
-        req.url.includes('/responses') &&
+        isResponses &&
         upstreamContentType.includes('text/event-stream') &&
         upstreamRes.statusCode === 200;
 
@@ -505,8 +591,13 @@ function createProxyServer(upstreamBase) {
     } catch (err) {
       logError('handler', err);
       if (!res.headersSent) {
-        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
-        res.end(`Internal Proxy Error: ${err.message}`);
+        const isNetworkError = Boolean(err && err.code);
+        res.writeHead(isNetworkError ? 502 : 500, {
+          'content-type': 'text/plain; charset=utf-8',
+        });
+        res.end(
+          `${isNetworkError ? 'Proxy Error' : 'Internal Proxy Error'}: ${err.message}`
+        );
       }
     }
   });

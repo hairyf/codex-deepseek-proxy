@@ -45,6 +45,14 @@ by default, configurable via the `DEEPSEEK_UPSTREAM` env var). Point
    format (synthesizes `output_item.added` / `content_part.added`, injects
    `item_id` / `output_index`, closes items with `done` events, and patches
    `response.completed` with the full `output` array).
+4. Converts assistant-message `content` arrays into plain strings — the
+   gateway rejects array `output_text` for `deepseek-v4-pro` with
+   `Invalid assistant message: content or tool_calls must be set`.
+5. Auto-retries once with `reasoning.effort = "none"` when the gateway
+   intermittently fails (400/500) because it drops `reasoning_content` in
+   thinking mode (`The reasoning_content in the thinking mode must be passed
+   back to the API`), so a flaky continuation turns into a successful call
+   instead of breaking the whole session.
 
 Requests that need no rewrite are forwarded byte-for-byte; headers and the
 streaming body pass through. The proxy forwards the `Authorization` header
@@ -109,6 +117,12 @@ End-to-end: spawn a subagent with `fork_turns="none"` and the message
   (`Invalid assistant message: content or tool_calls must be set`)
 - [anomalyco/opencode#42091](https://github.com/anomalyco/opencode/issues/42091) —
   `deepseek-v4-pro` returns `Empty input messages` for string content
+- [anomalyco/opencode#41061](https://github.com/anomalyco/opencode/issues/41061),
+  [anomalyco/opencode#24714](https://github.com/anomalyco/opencode/issues/24714),
+  [anomalyco/opencode#29690](https://github.com/anomalyco/opencode/issues/29690) —
+  gateway drops `reasoning_content` in thinking mode on follow-up / tool-call
+  messages: `The reasoning_content in the thinking mode must be passed back to
+  the API` (official DeepSeek API is unaffected)
 - [anomalyco/opencode#42134](https://github.com/anomalyco/opencode/issues/42134),
   [anomalyco/opencode#42228](https://github.com/anomalyco/opencode/issues/42228) —
   `deepseek-v4-pro`/`deepseek-v4-flash` gateway issues (China-hosted model,
