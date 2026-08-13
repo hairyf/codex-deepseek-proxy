@@ -1,5 +1,5 @@
 $dir = Join-Path $env:USERPROFILE '.codex\deepseek-proxy'
-$pidFile = Join-Path $dir 'watchdog.pid'
+$pidFile = Join-Path $dir '.cache\watchdog.pid'
 
 if (Test-Path $pidFile) {
     $wdPid = Get-Content -LiteralPath $pidFile

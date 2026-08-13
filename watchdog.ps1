@@ -1,10 +1,14 @@
 $ErrorActionPreference = 'Continue'
 $dir = 'C:\Users\wwu71\.codex\deepseek-proxy'
+$env:DEEPSEEK_UPSTREAM = 'https://opencode.ai/zen/go/v1'
 $node = (Get-Command node -ErrorAction Stop).Source
-$log = Join-Path $dir 'proxy.log'
-$errLog = Join-Path $dir 'proxy-error.log'
-$wdLog = Join-Path $dir 'proxy-watchdog.log'
-$pidFile = Join-Path $dir 'watchdog.pid'
+$log = Join-Path $dir 'logs\proxy.log'
+$errLog = Join-Path $dir 'logs\proxy-error.log'
+$wdLog = Join-Path $dir 'logs\proxy-watchdog.log'
+$pidFile = Join-Path $dir '.cache\watchdog.pid'
+
+New-Item -ItemType Directory -Force -Path (Join-Path $dir 'logs') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $dir '.cache') | Out-Null
 
 Set-Content -LiteralPath $pidFile -Value $PID
 
